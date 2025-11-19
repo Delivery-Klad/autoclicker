@@ -2,15 +2,15 @@ from random import uniform
 from threading import Thread
 from time import sleep, time
 from tkinter import Button, Entry, Frame, Label, Tk, BooleanVar, Checkbutton, Event, END
-from pyautogui import click
-from keyboard import add_hotkey, remove_hotkey, wait
+from pynput.mouse import Controller as MouseController, Button as MouseButton
+from pynput.keyboard import Listener
 
 
 class AutoClicker:
     def __init__(self, master):
         self.init_size = "490x150"
-        self.init_min_delay = 0.01
-        self.init_max_delay = 0.03
+        self.init_min_delay = 0.1
+        self.init_max_delay = 0.3
         self.clicking = False
         self.click_count = 0
 
@@ -18,13 +18,13 @@ class AutoClicker:
         self.master.title("Autoclicker")
         self.master.resizable(False, False)
         self.master.geometry(self.init_size)
-        self.master.protocol("WM_DELETE_WINDOW", self.quit)
+        self.master.protocol("WM_DELETE_WINDOW", self.on_quit)
 
         self.thread = None
         self.timer_start = None
         self.update_timer_running = False
 
-        # Always on top настройка с дефолтом True
+        # always on top var (default=True)
         self.always_on_top_var = BooleanVar(value=True)
         self.master.wm_attributes("-topmost", True)
 
@@ -32,6 +32,7 @@ class AutoClicker:
         self.start_key = "f8"
         self.quit_key = "f9"
         self.listening_for = None  # None, "start", "quit"
+        self.hotkey_prompt = None
 
         # dark theme
         self.bg_color = "#222222"
@@ -39,7 +40,6 @@ class AutoClicker:
         self.btn_bg = "#444444"
         self.btn_fg = "#ffffff"
         self.master.config(bg=self.bg_color)
-
         self.master.columnconfigure(0, weight=1, minsize=270)
         self.master.columnconfigure(1, weight=1, minsize=250)
         self.master.rowconfigure(0, weight=1)
@@ -48,9 +48,6 @@ class AutoClicker:
         left_frame = Frame(master, bg=self.bg_color)
         left_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         left_frame.columnconfigure(1, weight=1)
-
-        # hotkeys
-        self.hotkey_prompt = None
 
         self.start_key_label = Label(
             left_frame, text=f"Start/Stop hotkey: {self.start_key.upper()}", bg=self.bg_color,
@@ -72,7 +69,7 @@ class AutoClicker:
         )
         self.set_quit_key_btn.grid(row=1, column=1, sticky="w", pady=2)
 
-        # delay
+        # delay settings
         Label(
             left_frame, text="Min. delay (sec):", bg=self.bg_color, fg=self.fg_color
         ).grid(row=3, column=0, sticky="w")
@@ -116,15 +113,31 @@ class AutoClicker:
         )
         self.timer_label.grid(row=2, column=0, sticky="w", pady=(5, 0))
 
-        self.hotkeys = []
-        self.apply_settings()
+        # pynput hotkeys
+        self.listener = None
 
-        self.hotkey_thread = Thread(target=self.listen_hotkeys, daemon=True)
-        self.hotkey_thread.start()
+        self.listener_thread = Thread(target=self.listen_hotkeys, daemon=True)
+        self.listener_thread.start()
 
-    @classmethod
-    def listen_hotkeys(cls) -> None:
-        wait()
+    def listen_hotkeys(self):
+        def on_press(key):
+            try:
+                if hasattr(key, "char") and key.char:
+                    key_name = key.char.lower()
+                else:
+                    key_name = str(key).split(".")[-1]
+            except Exception:
+                key_name = str(key).split(".")[-1]
+
+            if not self.listening_for:
+                if key_name == self.start_key:
+                    self.master.after(0, self.toggle_clicking)
+                elif key_name == self.quit_key:
+                    self.master.after(0, self.on_quit)
+
+        with Listener(on_press=on_press) as listener:
+            self.listener = listener
+            listener.join()
 
     def show_key_prompt(self, text: str) -> None:
         frame = self.set_start_key_btn.master
@@ -153,18 +166,23 @@ class AutoClicker:
 
     def on_key_press(self, event: Event) -> None:
         key = event.keysym.lower()
-        self.master.unbind_all("<Key>")
-
         if self.listening_for == "start":
+            if key == self.quit_key:
+                return
+
+            self.master.unbind_all("<Key>")
             self.start_key = key
             self.start_key_label.config(text=f"Start/Stop hotkey: {self.start_key.upper()}")
         elif self.listening_for == "quit":
+            if key == self.start_key:
+                return
+
+            self.master.unbind_all("<Key>")
             self.quit_key = key
             self.quit_key_label.config(text=f"Exit hotkey: {self.quit_key.upper()}")
 
         self.hide_key_prompt()
         self.listening_for = None
-        self.apply_settings()
 
     def toggle_always_on_top(self) -> None:
         self.master.wm_attributes("-topmost", self.always_on_top_var.get())
@@ -183,6 +201,9 @@ class AutoClicker:
             self.max_delay_entry.insert(0, str(self.init_max_delay))
             return uniform(self.init_min_delay, self.init_max_delay)
 
+    def reset_entry_focus(self) -> None:
+        self.status_label.focus_set()
+
     def toggle_clicking(self) -> None:
         self.clicking = not self.clicking
         if self.clicking:
@@ -194,11 +215,13 @@ class AutoClicker:
         else:
             self.stop_timer()
             self.status_label.config(text="Status: Stopped", fg="red")
+            self.thread.join()
         self.reset_entry_focus()
 
     def click_loop(self) -> None:
+        mouse_controller = MouseController()
         while self.clicking:
-            click()
+            mouse_controller.click(MouseButton.left)
             self.click_count += 1
             self.master.after(0, self.click_label.config, {"text": f"Clicks: {self.click_count}"})
             sleep(self.get_delay())
@@ -218,25 +241,10 @@ class AutoClicker:
             self.timer_label.config(text=f"Time elapsed: {elapsed} sec")
             self.master.after(1000, self.update_timer)
 
-    def apply_settings(self) -> None:
-        # reset hotkeys
-        for hotkey in self.hotkeys:
-            remove_hotkey(hotkey)
-        self.hotkeys.clear()
-
-        # add new hotkeys
-        if self.start_key:
-            self.hotkeys.append(add_hotkey(self.start_key, self.toggle_clicking))
-        if self.quit_key:
-            self.hotkeys.append(add_hotkey(self.quit_key, self.quit))
-
-        self.master.focus_set()
-
-    def reset_entry_focus(self) -> None:
-        self.status_label.focus_set()
-
-    def quit(self) -> None:
+    def on_quit(self) -> None:
         self.clicking = False
+        if self.listener is not None:
+            self.listener.stop()
         self.master.quit()
 
 
