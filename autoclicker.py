@@ -1,10 +1,10 @@
 from json import dump, load
-from os import getenv, makedirs, path
+from os import getenv, makedirs, path, remove
 from random import uniform
 from threading import Thread
 from time import sleep, time
 
-from pynput.keyboard import Listener
+from pynput.keyboard import Listener as KeyboardListener
 from pynput.mouse import Button as MouseButton, Controller as MouseController
 
 from tkinter import Event, TclError
@@ -17,7 +17,7 @@ from customtkinter import (
 
 class Settings:
     app_title = "AutoClicker"
-    app_version = "1.3"
+    app_version = "1.4"
     settings_folder_name = "AutoClicker"
     init_size = "490x180"
     scaled_size = "490x210"
@@ -28,6 +28,8 @@ class Settings:
         self.start_key = "f8"
         self.quit_key = "f9"
         self.save_settings = False
+        self.winfo_x = None
+        self.winfo_y = None
         self.load()
 
     def _get_config_path(self, create_if_not_exists=False) -> str:
@@ -51,7 +53,7 @@ class Settings:
 
     def save(
         self, min_delay: DoubleVar, max_delay: DoubleVar, start_key: str, quit_key: str,
-        save_settings: bool
+        save_settings: bool, winfo_x: int, winfo_y: int
     ) -> None:
         settings_file_path = self._get_config_path(create_if_not_exists=True)
         data = {
@@ -59,7 +61,9 @@ class Settings:
             "max_delay": self._parse_float(max_delay) or self.max_delay,
             "start_key": start_key,
             "quit_key": quit_key,
-            "save_settings": save_settings
+            "save_settings": save_settings,
+            "winfo_x": winfo_x,
+            "winfo_y": winfo_y
         }
         with open(settings_file_path, "w", encoding="utf-8") as settings_file:
             dump(data, settings_file, indent=2)
@@ -75,6 +79,14 @@ class Settings:
         self.start_key = data.get("start_key", self.start_key)
         self.quit_key = data.get("quit_key", self.quit_key)
         self.save_settings = data.get("save_settings", self.save_settings)
+        self.winfo_x = data.get("winfo_x", self.winfo_x)
+        self.winfo_y = data.get("winfo_y", self.winfo_y)
+
+    def reset_settings(self) -> None:
+        settings_file_path = self._get_config_path()
+        if not path.exists(settings_file_path):
+            return
+        remove(settings_file_path)
 
 
 class AutoClicker:
@@ -193,21 +205,31 @@ class AutoClicker:
         self.listener_thread.start()
 
         # Update window position
-        self.master.update_idletasks()
-        self.center_window()
+        self.center_window_or_load_position()
 
-    def center_window(self) -> None:
+    def center_window_or_load_position(self) -> None:
         self.master.update_idletasks()
-        size = self.init_size.split("x")
-        width = int(size[0])
-        height = int(size[1])
-        screen_width = self.master.winfo_screenwidth()
-        screen_height = self.master.winfo_screenheight()
-        x = (screen_width // 2) - (width // 2)
-        y = (screen_height // 2) - (height // 2)
+        size: list[str] = self.init_size.split("x")
+        width: int = int(size[0])
+        height: int = int(size[1])
+        screen_width: int = self.master.winfo_screenwidth()
+        screen_height: int = self.master.winfo_screenheight()
+
+        if self.settings.winfo_x and self.settings.winfo_y:
+            self.settings.winfo_x = 0 if self.settings.winfo_x < 0 else self.settings.winfo_x
+            self.settings.winfo_y = 0 if self.settings.winfo_y < 0 else self.settings.winfo_y
+            if self.settings.winfo_y + height > screen_height:
+                self.settings.winfo_y = screen_height - height - 40
+            x: int = self.settings.winfo_x
+            y: int = self.settings.winfo_y
+        else:
+            x: int = (screen_width // 2) - (width // 2)
+            y: int = (screen_height // 2) - (height // 2)
         self.master.geometry(f"{width}x{height}+{x}+{y}")
 
     def listen_hotkeys(self) -> None:
+        pressed_keys = set()
+
         def on_press(key):
             try:
                 if hasattr(key, "char") and key.char:
@@ -217,13 +239,28 @@ class AutoClicker:
             except Exception:
                 key_name = str(key).split(".")[-1]
 
+            if key_name in pressed_keys:
+                return
+            pressed_keys.add(key_name)
+
             if not self.listening_for:
                 if key_name == self.start_key:
                     self.master.after(0, self.toggle_clicking)
                 elif key_name == self.quit_key:
                     self.master.after(0, self.on_quit)
 
-        with Listener(on_press=on_press) as listener:
+        def on_release(key):
+            try:
+                if hasattr(key, "char") and key.char:
+                    key_name = key.char.lower()
+                else:
+                    key_name = str(key).split(".")[-1]
+            except Exception:
+                key_name = str(key).split(".")[-1]
+            if key_name in pressed_keys:
+                pressed_keys.remove(key_name)
+
+        with KeyboardListener(on_press=on_press, on_release=on_release) as listener:
             self.listener = listener
             listener.join()
 
@@ -282,11 +319,11 @@ class AutoClicker:
             if min_delay > max_delay:
                 self.min_delay_var.set(max_delay)
                 self.max_delay_var.set(min_delay)
-            return uniform(self.min_delay_var.get(), self.max_delay_var.get())
+            return round(uniform(self.min_delay_var.get(), self.max_delay_var.get()), 4)
         except Exception:
             self.min_delay_var.set(self.settings.min_delay)
             self.max_delay_var.set(self.settings.max_delay)
-            return uniform(self.settings.min_delay, self.settings.max_delay)
+            return round(uniform(self.settings.min_delay, self.settings.max_delay), 4)
 
     def reset_entry_focus(self) -> None:
         self.status_label.focus_set()
@@ -333,8 +370,10 @@ class AutoClicker:
         if self.save_settings_var.get():
             self.settings.save(
                 self.min_delay_var, self.max_delay_var, self.start_key, self.quit_key,
-                self.save_settings_var.get()
+                self.save_settings_var.get(), self.master.winfo_x(), self.master.winfo_y()
             )
+        else:
+            self.settings.reset_settings()
         self.clicking = False
         if self.listener is not None:
             self.listener.stop()
@@ -345,3 +384,5 @@ if __name__ == "__main__":
     root = CTk()
     app = AutoClicker(root)
     root.mainloop()
+
+# pyinstaller --onefile --windowed --clean --strip --exclude-module=altgraph --exclude-module=keyboard --exclude-module=pefile --exclude-module=pillow --exclude-module=pip --exclude-module=pyinstaller --exclude-module=pyinstaller-hooks-contrib --exclude-module=pymsgbox --exclude-module=pyperclip --exclude-module=pyrect --exclude-module=pyscreeze --exclude-module=pytweening --exclude-module=pywin32-ctypes --exclude-module=setuptools --upx-dir=D:\soft\upx .\autoclicker.py
