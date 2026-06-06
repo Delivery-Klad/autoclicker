@@ -1,3 +1,4 @@
+import sys
 from json import dump, load
 from os import getenv, makedirs, path, remove
 from random import uniform
@@ -7,7 +8,7 @@ from time import sleep, time
 from pynput.keyboard import GlobalHotKeys
 from pynput.mouse import Button as MouseButton, Controller as MouseController
 
-from tkinter import Event as TkEvent, TclError
+from tkinter import Event as TkEvent, TclError, messagebox
 
 from customtkinter import (
     CTk, CTkButton, CTkCheckBox, CTkEntry, CTkFrame, CTkFont, CTkLabel,
@@ -17,16 +18,18 @@ from customtkinter import (
 
 class Settings:
     app_title = "AutoClicker"
-    app_version = "1.4"
+    app_version = "1.5"
     settings_folder_name = "AutoClicker"
     init_size = "490x180"
     scaled_size = "490x210"
+    default_start_key = "f8"
+    default_quit_key = "f9"
 
     def __init__(self):
         self.min_delay = 0.1
         self.max_delay = 0.3
-        self.start_key = "f8"
-        self.quit_key = "f9"
+        self.start_key = self.default_start_key
+        self.quit_key = self.default_quit_key
         self.save_settings = False
         self.winfo_x = None
         self.winfo_y = None
@@ -51,6 +54,14 @@ class Settings:
         except (ValueError, TclError):
             return None
 
+    @staticmethod
+    def get_icon_path():
+        if getattr(sys, "frozen", False):
+            base_path = sys._MEIPASS
+        else:
+            base_path = path.abspath(".")
+        return path.join(base_path, "icon1.ico")
+
     def save(
         self, min_delay: DoubleVar, max_delay: DoubleVar, start_key: str, quit_key: str,
         save_settings: bool, winfo_x: int, winfo_y: int
@@ -72,8 +83,10 @@ class Settings:
         settings_file_path = self._get_config_path()
         if not path.exists(settings_file_path):
             return
+
         with open(settings_file_path, "r", encoding="utf-8") as settings_file:
             data = load(settings_file)
+
         self.min_delay = data.get("min_delay", self.min_delay)
         self.max_delay = data.get("max_delay", self.max_delay)
         self.start_key = data.get("start_key", self.start_key)
@@ -99,8 +112,10 @@ class AutoClicker:
         self.init_size = self.settings.init_size
         self.clicking = False
         self.click_count = 0
+        self._last_click_update = None
 
         self.master = master
+        # self.master.iconbitmap(self.settings.get_icon_path())
         self.master.title(self.settings.app_title)
         self.master.resizable(False, False)
         self.master.geometry(self.init_size)
@@ -119,7 +134,7 @@ class AutoClicker:
         self.min_delay_var = DoubleVar(value=self.settings.min_delay)
         self.max_delay_var = DoubleVar(value=self.settings.max_delay)
 
-        self.start_key = self.settings.start_key  # строка вида "f8" или "a"
+        self.start_key = self.settings.start_key  # string like "f8" or "z"
         self.quit_key = self.settings.quit_key
         self.listening_for = None
         self.hotkey_prompt = None
@@ -233,19 +248,28 @@ class AutoClicker:
             return f"<{key}>"
         return key
 
-    def rebind_hotkeys(self) -> None:
-        if self.hotkeys is not None:
-            self.hotkeys.stop()
-
+    def get_hotkeys_mapping(self) -> dict:
         start_combo = self._pynput_key_name(self.start_key)
         quit_combo = self._pynput_key_name(self.quit_key)
 
-        mapping = {
+        return {
             start_combo: self.toggle_clicking,
             quit_combo: self.on_quit,
         }
 
-        self.hotkeys = GlobalHotKeys(mapping)
+    def rebind_hotkeys(self) -> None:
+        if self.hotkeys is not None:
+            self.hotkeys.stop()
+
+        hotkeys_mapping = self.get_hotkeys_mapping()
+        try:
+            self.hotkeys = GlobalHotKeys(hotkeys_mapping)
+        except ValueError:
+            messagebox.showerror("Error", "Wrong hotkey.")
+            self.reset_hotkeys()
+            hotkeys_mapping = self.get_hotkeys_mapping()
+            self.hotkeys = GlobalHotKeys(hotkeys_mapping)
+
         self.hotkeys.start()
 
     def show_key_prompt(self, text: str) -> None:
@@ -292,6 +316,12 @@ class AutoClicker:
         self.listening_for = None
         self.rebind_hotkeys()
 
+    def reset_hotkeys(self) -> None:
+        self.start_key = self.settings.start_key = self.settings.default_start_key
+        self.start_key_display.configure(text=self.start_key.upper())
+        self.quit_key = self.settings.quit_key = self.settings.default_quit_key
+        self.quit_key_display.configure(text=self.quit_key.upper())
+
     def toggle_always_on_top(self) -> None:
         self.master.wm_attributes("-topmost", self.always_on_top_var.get())
 
@@ -299,9 +329,13 @@ class AutoClicker:
         try:
             min_delay = self.min_delay_var.get()
             max_delay = self.max_delay_var.get()
+            if min_delay == max_delay:
+                return round(max_delay, 4)
             if min_delay > max_delay:
-                self.min_delay_var.set(max_delay)
-                self.max_delay_var.set(min_delay)
+                current_min_delay = min_delay
+                current_max_delay = max_delay
+                self.min_delay_var.set(current_max_delay)
+                self.max_delay_var.set(current_min_delay)
             return round(uniform(self.min_delay_var.get(), self.max_delay_var.get()), 4)
         except Exception:
             self.min_delay_var.set(self.settings.min_delay)
@@ -332,9 +366,16 @@ class AutoClicker:
         while not self.stop_event.is_set():
             mouse_controller.click(MouseButton.left)
             self.click_count += 1
-            self.master.after(
-                0, lambda c=self.click_count: self.click_label.configure(text=f"Clicks: {c}")
-            )
+
+            # Reduce UI updates count
+            current_time = time()
+            if not self._last_click_update or current_time - self._last_click_update >= 0.2:
+                self.master.after(
+                    0, lambda count=self.click_count: self.click_label.configure(
+                        text=f"Clicks: {count}"
+                    ),
+                )
+                self._last_click_update = current_time
             sleep(self.get_delay())
 
     def start_timer(self) -> None:
